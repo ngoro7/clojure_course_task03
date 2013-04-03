@@ -1,5 +1,7 @@
 (ns clojure-course-task03.core
-  (:require [clojure.set]))
+  (:require [clojure.set])
+  (:require [clojure.string :as s])
+  )
 
 (defn join* [table-name conds]
   (let [op (first conds)
@@ -204,39 +206,175 @@
   )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; TBD: Implement the following macros
+;; group
+;; user
+;; with-user
+;;  macros implementation
 ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; fields sanity:
+;; ['person, 'phone, 'address, 'price] -> ['person, 'phone, 'address, 'price]
+;; ['person, :all, 'phone, 'address, 'price] -> [:all]
+(defn prep-table-fields [flds]
+	(if (some #{:all} flds)
+	  [:all]
+	  (vec flds)))
+
+;; ['person 'phone 'address 'price]  -> person,phone,address,price
+;; ['person :all  'phone 'address 'price] -> *
+(defn select-fields-str [flds]
+	(if (= :all (first flds))
+	  "*"
+	  (s/join "," flds)))
+
+
+(defn to-keywords-vec [xs]
+	(vec (map #(if (keyword? %) % (keyword %)) xs)))
+
+
+;; Merge 2 vectors get rid of duplicated fields
+;; If :all present then returns [:all]
+(defn merge-fields [flds1 flds2]
+	(let [set1 (set flds1)
+	      set2 (set flds2)
+	      uset (clojure.set/union set1 set2)]
+	  (prep-table-fields (vec uset))))
+
+;; Merge 2 vectors get rid of duplicated fields
+;; If :all present then returns [:all]
+(defn merge-fields [flds1 flds2]
+	(let [set1 (set flds1)
+	      set2 (set flds2)
+	      uset (clojure.set/union set1 set2)]
+	  (prep-table-fields (vec uset))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Macro group
+;; Syntax:
+;; (group Agent
+;;      proposal -> [person, phone, address, price]
+;;      agents -> [clients_id, proposal_id, agent])  
+;; 
+;; Generates:
+;; 1) (defn select-agent-agents ....
+;; which produce sql select strings:
+;;   "SELECT clients_id,proposal_id,agent FROM agents "
+;; (defn select-agent-agents ....
+;; which produce sql select strings:
+;;   "SELECT person,phone,address,price FROM proposal "
+;; 2) List of group tables:
+;;  (def group-agent-tables [:agents, :proposal])
+;; 3) defs:
+;;  (def group-agent-agents-fields [:clients_id :proposal_id :agent])
+;;  (def group-agent-proposal-fields [:person :phone :address :price])
 
 (defmacro group [name & body]
-  ;; Пример
-  ;; (group Agent
-  ;;      proposal -> [person, phone, address, price]
-  ;;      agents -> [clients_id, proposal_id, agent])
-  ;; 1) Создает группу Agent
-  ;; 2) Запоминает, какие таблицы (и какие колонки в таблицах)
-  ;;    разрешены в данной группе.
-  ;; 3) Создает следующие функции
-  ;;    (select-agent-proposal) ;; select person, phone, address, price from proposal;
-  ;;    (select-agent-agents)  ;; select clients_id, proposal_id, agent from agents;
-  )
+  ;; Argumets check
+  ;; body should be empty or list of triplets
+  {:pre [(or (nil? body )
+         (= (mod (count body) 3) 0))]}
+  ;;
+   (let [table-elems (partition 3 body)
+         name (s/lower-case name)]
+    `(do
+       ~@(map
+         (fn [[table-name arrow fields]]
+           (if-not (= arrow '->)
+             (throw (IllegalArgumentException. "Invalid group expression: absent '->'")))
+           (let [table-name (->> table-name str s/lower-case)
+                 select-fn-name (str "select-" name "-" table-name)
+                 fields (prep-table-fields fields)]
+           `(do
+             (defn ~(symbol select-fn-name) []
+             (format "SELECT %s FROM %s " ~(select-fields-str fields) ~table-name))
+             (def ~(symbol (format "group-%s-%s-fields" name table-name)) ~(to-keywords-vec fields)))
+             )) table-elems )
 
-(defmacro user [name & body]
-  ;; Пример
-  ;; (user Ivanov
-  ;;     (belongs-to Agent))
-  ;; Создает переменные Ivanov-proposal-fields-var = [:person, :phone, :address, :price]
-  ;; и Ivanov-agents-fields-var = [:clients_id, :proposal_id, :agent]
-  ;; Сохраняет эти же переменные в атоме *user-tables-vars*.
-  )
+        (def ~(symbol (format "group-%s-tables" name))
+          ~(->>
+            table-elems
+            (map first)
+            (map keyword)
+            vec))
+        )))
 
-(defmacro with-user [name & body]
-  ;; Пример
-  ;; (with-user Ivanov
-  ;;   . . .)
-  ;; 1) Находит все переменные, начинающиеся со слова Ivanov, в *user-tables-vars*
-  ;;    (Ivanov-proposal-fields-var и Ivanov-agents-fields-var)
-  ;; 2) Создает локальные привязки без префикса Ivanov-:
-  ;;    proposal-fields-var и agents-fields-var.
-  ;;    Таким образом, функция select, вызванная внутри with-user, получает
-  ;;    доступ ко всем необходимым переменным вида <table-name>-fields-var.
-  )
+
+;; (group-tables "agent")
+;; ->
+;; (["proposal" "agent"] ["agents" "agent"])
+(defn group-tables [group-name]
+  (let [grdef (str "group-" group-name "-tables")
+        tables (deref (resolve (symbol grdef)))]
+    (for [t tables] [(name t) group-name])))
+
+;; Table and their group list
+;; Get groups list
+;; e.g.  ["agent" "operator"]
+;; and genarate list like (("table1" ("group1" "group2")  ("table2" ("group3"))
+;; For example: (("proposal" ("agent" "operator")) ("agents" ("agent")) ("clients" ("operator")))
+(defn table-groups [groups]
+(->> groups
+  (map group-tables)
+  (reduce concat)
+  (group-by first)
+  (map #(list (first %) (map second (second %))))))
+
+;; Get group and table names
+;; and return table fields for this group
+;; Example:
+;; (group-table-fields "agent" "agents")
+;; may result
+;; [:clients_id :proposal_id :agent]
+(defn group-table-fields [group table]
+  (let [ident (str "group-" group "-" table "-fields")]
+    (deref (resolve (symbol ident)))))
+
+;; Merge 2 vectors get rid of duplicated fields
+;; If :all present then returns [:all]
+(defn merge-fields [flds1 flds2]
+  (let [set1 (set flds1)
+        set2 (set flds2)
+        uset (clojure.set/union set1 set2)]
+    (prep-table-fields (vec uset))))
+
+;; Store map like this:
+;; {"User1" #{"tbl1" "tbl2"}, "User2" #{"tbl1" "tbl3" "tbl5"}}
+(def ^:dynamic *user-tables-vars* (atom {}))
+
+;; Register user's table name
+(defn register-user-table-name [user-name table-name]
+  (swap! *user-tables-vars* (partial merge-with clojure.set/union {user-name (hash-set table-name)})))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Based on group permissions on tables fields
+;; generates defs like:
+;; (do (def Ivanov-proposal-fields-var [:all]) (def Ivanov-agents-fields-var [:clients_id :proposal_id :agent]) )
+;; Also regiter table name in *user-tables-vars* atom
+(defmacro user [user-name & groups]
+	(assert (not (nil? groups)) "Syntax error: Groups list not found")
+  (let [body (first groups)
+        belongs-to (first body)]
+    (assert (= (name belongs-to) "belongs-to") "Syntax error: 'belongs-to' not found")
+    (let [groups (rest body)]
+      (assert (not (empty? groups)) "User should belongs to at least one group")
+      (let [tg (table-groups (->> groups (map name) (map s/lower-case)))]
+
+        `(do
+          ~@(map (fn [[table groups]]
+	           (let [all-fields (map #(group-table-fields % table) groups)
+		               fields (reduce merge-fields all-fields)]
+		          `(do
+		            (register-user-table-name ~(name user-name) ~table)
+	              (def ~(symbol (str user-name "-" table "-fields-var")) ~fields))
+	           )) tg ))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(defmacro with-user [username & body]
+(if-not (nil? body)
+  (let [username (name username)
+        tables (get @*user-tables-vars* username)
+        bnds (vec (mapcat #(vector (symbol (str % "-fields-var")) (symbol (str username "-" % "-fields-var"))) tables))]
+	`(let ~bnds ~@body)
+   )))
